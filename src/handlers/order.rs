@@ -24,6 +24,68 @@ struct CartItemForOrder {
     product_price: i32,
 }
 
+pub async fn get_orders(
+    State(pool): State<DbPool>,
+) -> Result<Json<Vec<OrderResponse>>, (StatusCode, Json<Value>)> {
+    let orders = sqlx::query_as::<_, Order>("SELECT * FROM orders ORDER BY created_at DESC")
+        .fetch_all(&pool)
+        .await;
+
+    match orders {
+        Ok(orders) => {
+            let mut order_responses = Vec::new();
+
+            for order in orders {
+                let order_items = sqlx::query_as::<_, OrderItemRow>(
+                    r#"
+                    SELECT oi.product_id, oi.product_name, oi.product_price, oi.quantity
+                    FROM order_items oi
+                    WHERE oi.order_id = $1
+                    "#,
+                )
+                .bind(order.id)
+                .fetch_all(&pool)
+                .await;
+
+                match order_items {
+                    Ok(items) => {
+                        let order_item_responses: Vec<OrderItemResponse> = items
+                            .into_iter()
+                            .map(|item| {
+                                OrderItemResponse::new(
+                                    item.product_id,
+                                    item.product_name,
+                                    item.product_price,
+                                    item.quantity,
+                                )
+                            })
+                            .collect();
+
+                        let order_response = OrderResponse::new(order, order_item_responses);
+                        order_responses.push(order_response);
+                    }
+                    Err(e) => {
+                        tracing::error!("Error fetching order items: {}", e);
+                        return Err((
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({"error": "Failed to fetch order items"})),
+                        ));
+                    }
+                }
+            }
+
+            Ok(Json(order_responses))
+        }
+        Err(e) => {
+            tracing::error!("Error fetching orders: {}", e);
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "Failed to fetch orders"})),
+            ))
+        }
+    }
+}
+
 pub async fn get_user_orders(
     Path(user_id): Path<Uuid>,
     State(pool): State<DbPool>,

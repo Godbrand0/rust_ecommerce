@@ -39,6 +39,59 @@ pub async fn initialize_payment(
 
             let reference = PaystackService::generate_reference();
 
+            if paystack_service.is_mock_mode() {
+                let mut tx = match pool.begin().await {
+                    Ok(tx) => tx,
+                    Err(e) => {
+                        tracing::error!("Failed to begin database transaction: {}", e);
+                        return Err((
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            Json(json!({"error": "Database service unavailable"})),
+                        ));
+                    }
+                };
+
+                let update_result = sqlx::query(
+                    "UPDATE orders SET payment_reference = $1 WHERE id = $2",
+                )
+                .bind(&reference)
+                .bind(order_id)
+                .execute(&mut *tx)
+                .await;
+
+                match update_result {
+                    Ok(_) => {
+                        if let Err(e) = tx.commit().await {
+                            tracing::error!("Failed to commit transaction: {}", e);
+                            return Err((
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                Json(json!({"error": "Failed to initialize payment"})),
+                            ));
+                        }
+
+                        return Ok(Json(json!({
+                            "status": true,
+                            "message": "Payment initialized successfully (mock mode)",
+                            "data": {
+                                "authorization_url": format!("https://example.com/mock-checkout?reference={}", reference),
+                                "access_code": "mock_access_code",
+                                "reference": reference
+                            }
+                        })));
+                    }
+                    Err(e) => {
+                        if let Err(rollback_err) = tx.rollback().await {
+                            tracing::error!("Failed to rollback transaction: {}", rollback_err);
+                        }
+                        tracing::error!("Error updating order with payment reference: {}", e);
+                        return Err((
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({"error": "Failed to initialize payment"})),
+                        ));
+                    }
+                }
+            }
+
             match paystack_service
                 .initialize_payment(email, order.total_amount, &reference)
                 .await
@@ -140,6 +193,85 @@ pub async fn verify_payment(
     Json(payment_data): Json<VerifyPaymentRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let reference = &payment_data.reference;
+
+    if paystack_service.is_mock_mode() {
+        let mut tx = match pool.begin().await {
+            Ok(tx) => tx,
+            Err(e) => {
+                tracing::error!("Failed to begin database transaction: {}", e);
+                return Err((
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({"error": "Database service unavailable"})),
+                ));
+            }
+        };
+
+        let order = sqlx::query_as::<_, Order>("SELECT * FROM orders WHERE payment_reference = $1")
+            .bind(reference)
+            .fetch_optional(&mut *tx)
+            .await;
+
+        match order {
+            Ok(Some(order)) => {
+                let update_result = sqlx::query("UPDATE orders SET status = $1 WHERE id = $2")
+                    .bind("paid")
+                    .bind(order.id)
+                    .execute(&mut *tx)
+                    .await;
+
+                match update_result {
+                    Ok(_) => {
+                        if let Err(e) = tx.commit().await {
+                            tracing::error!("Failed to commit transaction: {}", e);
+                            return Err((
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                Json(json!({"error": "Failed to verify payment"})),
+                            ));
+                        }
+
+                        return Ok(Json(json!({
+                            "status": true,
+                            "message": "Payment verified successfully (mock mode)",
+                            "data": {
+                                "order_id": order.id,
+                                "amount": order.total_amount,
+                                "paid_at": chrono::Utc::now().to_rfc3339()
+                            }
+                        })));
+                    }
+                    Err(e) => {
+                        if let Err(rollback_err) = tx.rollback().await {
+                            tracing::error!("Failed to rollback transaction: {}", rollback_err);
+                        }
+                        tracing::error!("Error updating order status: {}", e);
+                        return Err((
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({"error": "Failed to verify payment"})),
+                        ));
+                    }
+                }
+            }
+            Ok(None) => {
+                if let Err(rollback_err) = tx.rollback().await {
+                    tracing::error!("Failed to rollback transaction: {}", rollback_err);
+                }
+                return Err((
+                    StatusCode::NOT_FOUND,
+                    Json(json!({"error": "Order not found for this payment reference"})),
+                ));
+            }
+            Err(e) => {
+                if let Err(rollback_err) = tx.rollback().await {
+                    tracing::error!("Failed to rollback transaction: {}", rollback_err);
+                }
+                tracing::error!("Error fetching order: {}", e);
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": "Failed to verify payment"})),
+                ));
+            }
+        }
+    }
 
     match paystack_service.verify_payment(reference).await {
         Ok(response) => {

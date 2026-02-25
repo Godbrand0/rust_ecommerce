@@ -8,6 +8,28 @@ use uuid::Uuid;
 use crate::models::{User, UserResponse, CreateUser};
 use crate::services::DbPool;
 
+pub async fn get_users(
+    State(pool): State<DbPool>,
+) -> Result<Json<Vec<UserResponse>>, (StatusCode, Json<Value>)> {
+    let users = sqlx::query_as::<_, User>("SELECT * FROM users ORDER BY created_at DESC")
+        .fetch_all(&pool)
+        .await;
+
+    match users {
+        Ok(users) => {
+            let user_responses: Vec<UserResponse> = users.into_iter().map(UserResponse::from).collect();
+            Ok(Json(user_responses))
+        }
+        Err(e) => {
+            tracing::error!("Error fetching users: {}", e);
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "Failed to fetch users"})),
+            ))
+        }
+    }
+}
+
 pub async fn create_user(
     State(pool): State<DbPool>,
     Json(user_data): Json<CreateUser>,
