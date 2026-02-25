@@ -62,6 +62,7 @@ pub struct PaystackService {
     client: Client,
     secret_key: String,
     base_url: String,
+    mock_mode: bool,
 }
 
 impl PaystackService {
@@ -70,11 +71,19 @@ impl PaystackService {
         
         let secret_key = env::var("PAYSTACK_SECRET_KEY")
             .expect("PAYSTACK_SECRET_KEY must be set");
+        let mock_mode_env = env::var("PAYSTACK_MOCK")
+            .unwrap_or_else(|_| "false".to_string())
+            .to_ascii_lowercase();
+        let mock_mode = mock_mode_env == "1"
+            || mock_mode_env == "true"
+            || mock_mode_env == "yes"
+            || secret_key == "sk_test_placeholder";
         
         Self {
             client: Client::new(),
             secret_key,
             base_url: "https://api.paystack.co".to_string(),
+            mock_mode,
         }
     }
     
@@ -121,6 +130,10 @@ impl PaystackService {
     
     pub fn generate_reference() -> String {
         format!("ECOM_{}_{}", Uuid::new_v4().to_string().replace("-", "")[..8].to_uppercase(), chrono::Utc::now().timestamp())
+    }
+
+    pub fn is_mock_mode(&self) -> bool {
+        self.mock_mode
     }
 }
 
